@@ -34,3 +34,5 @@ The starter repository contains the collaboration structure only. The supplied C
 5. Before the interview, rehearse the new-batch ETL and individual analytics flows against permitted test data. Only process tutor-provided interview URLs when the tutor supplies them at the interview.
 
 See [docs/project-plan.md](docs/project-plan.md) for the initial backlog and acceptance criteria.
+
+GitHub Project: [AMLOP CA1 - Fraud Detection](https://github.com/users/abacked/projects/4). Its `Product backlog` table holds the PBIs and estimates; `Sprint board` tracks their progress.

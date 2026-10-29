@@ -21,7 +21,7 @@ Effort values are **suggested story points**, not final team estimates. The brie
 
 ## Board setup
 
-Use status columns `Backlog`, `Ready`, `In progress`, `In review`, and `Done`. Add an `Estimate` number field and a `Sprint` iteration field if available. Create a board view grouped by status. Do not assign teammates until the team agrees on ownership.
+The GitHub Project has `Product backlog` and `Sprint board` views. Its status options are `Todo`, `In Progress`, and `Done`. The `Estimate` number field contains the suggested points above; the `Sprint` field has `Sprint 1`, `Sprint 2`, and `Sprint 3` placeholders. The team should confirm estimates and map the sprint names to its actual calendar during planning. Do not assign teammates until the team agrees on ownership.
 
 ## Definition of done
 
