@@ -23,7 +23,7 @@ Submission is through Brightspace. A GitHub repository or Project board is a wor
 | `docs/` | Decisions, runbooks, and demo notes |
 | `.github/` | GitHub issue and pull request templates |
 
-The starter repository contains the collaboration structure only. The supplied CSVs and assessment PDF stay local; `.gitignore` excludes them from commits. Copy future batch files into `data/` locally, and record the source URL, batch suffix, and processing outcome in the ETL logs.
+The three supplied base CSVs are stored in `data/` with Git LFS. Install Git LFS before cloning or pulling so you receive the CSV contents rather than pointer files. The assessment PDF is not committed. Future batch files remain ignored by default; record their source URL, batch suffix, and processing outcome in ETL logs.
 
 ## Team workflow
 

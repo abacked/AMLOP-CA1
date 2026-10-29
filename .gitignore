@@ -1,9 +1,13 @@
 # Assignment data and documents
-data/
-*_base.csv
+# Only the three supplied base CSVs are intentionally versioned in Git LFS.
+data/*
 customers_*.csv
 orders_*.csv
 labels_*.csv
+!data/README.md
+!data/customers_base.csv
+!data/orders_base.csv
+!data/labels_base.csv
 *CA1*Spec*.pdf
 
 # Credentials and local configuration
