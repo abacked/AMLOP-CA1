@@ -1,0 +1,39 @@
+# Assignment data and documents
+data/
+*_base.csv
+customers_*.csv
+orders_*.csv
+labels_*.csv
+*CA1*Spec*.pdf
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Python and notebooks
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# Generated model and pipeline outputs
+mlruns/
+artifacts/
+reports/generated/
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor and OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

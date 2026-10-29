@@ -1,0 +1,25 @@
+name: Sprint task
+description: A small, assignable task linked to a Product Backlog Item
+title: "Task: "
+labels: ["task"]
+body:
+  - type: input
+    id: parent
+    attributes:
+      label: Parent PBI
+      description: Link the Product Backlog Item this task supports.
+      placeholder: "#1"
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Expected outcome
+      description: State the deliverable and how it will be checked.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Dependencies, data, or review details.
