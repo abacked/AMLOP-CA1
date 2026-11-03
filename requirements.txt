@@ -1,0 +1,7 @@
+# cleaning.py needs only pandas + numpy; the rest is for eda.ipynb and tests.
+pandas>=2.0
+numpy
+matplotlib
+ipykernel
+nbconvert
+pytest

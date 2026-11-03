@@ -41,3 +41,6 @@ reports/generated/
 Thumbs.db
 .vscode/
 .idea/
+
+# Local course files (spec, templates, screenshots); never committed
+private/
