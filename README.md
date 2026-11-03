@@ -6,8 +6,8 @@ Team workspace for ST1519 Agile MLOps CA1 (AY2026/27 Semester 2). The project st
 
 | Milestone | Deadline (Singapore time) |
 | --- | --- |
-| Part 1 group product backlog | 13 Nov 2026, 4:00 pm |
-| Part 2 group and individual submissions | 27 Nov 2026, 4:00 pm |
+| Part 1 group product backlog | 16 Nov 2026, 9:00 am |
+| Part 2 group and individual submissions | 30 Nov 2026, 9:00 am |
 | Interview and live demo | Week 7; tutor to confirm slot |
 
 Submission is through Brightspace. A GitHub repository or Project board is a work area, not the final submission by itself.
