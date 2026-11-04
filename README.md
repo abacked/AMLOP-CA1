@@ -25,6 +25,24 @@ Submission is through Brightspace. A GitHub repository or Project board is a wor
 
 The three supplied base CSVs are stored in `data/` with Git LFS. Install Git LFS before cloning or pulling so you receive the CSV contents rather than pointer files. The assessment PDF is not committed. Future batch files remain ignored by default; record their source URL, batch suffix, and processing outcome in ETL logs.
 
+## Feature engineering setup
+
+Use Python 3.12 (the tested version). From the repository root in PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-features-dev.txt
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+Use `requirements-features.txt` alone for runtime installation. The manifests pin the tested direct dependencies; transitive dependencies are resolved by pip. They are separate from PR #13's pending requirements so this branch can be installed independently. Reconcile the manifests when that PR is merged, retaining its cleaning and notebook dependencies.
+
+Set `$env:PYTHONPATH = "src"` to import `OrderFeatures` and `make_feature_pipeline` from `amlop_ca1.features` in Python scripts. Split rows first, fit the pipeline on training rows, and use only `transform` for validation, test, and inference. Save the fitted pipeline with the model.
+
+The feature builder preserves row order and ignores targets, identifiers, refunds, and unverified customer history. Pass canonical category values from cleaning when available. Skip empty batches after cleaning. Invalid numeric types become missing; finite numbers exceeding `1e100` raise an error before imputation or scaling. This ceiling protects numerical operations and does not define a business maximum for order values.
+
+This implements the order-feature preprocessing portion of PBI-02. Skew-transform experiments, model class weighting, temporal evaluation, and the cleaning/join checks remain separate work; PBI-02 should stay open.
+
 ## Team workflow
 
 1. Refine the Product Backlog Items in GitHub Issues during the Week 3 requirements meeting. Set estimates with the team.
