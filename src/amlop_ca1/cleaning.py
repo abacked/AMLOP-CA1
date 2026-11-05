@@ -5,6 +5,8 @@ the etl both import this, so they clean data exactly the same way.
 """
 
 import logging
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -18,7 +20,8 @@ CUSTOMER_KEY = ["country_code", "customer_id"]
 
 
 
-# pass to pd.read_csv so ids stay text and mobile_verified isn't a mix of bool and text.
+# read with load_csv so ids stay text ("00123" keeps its zeros) and mobile_verified
+# isn't a mix of bool and text.
 CSV_DTYPES = {
     "country_code": "string",
     "customer_id": "string",
@@ -67,6 +70,18 @@ KNOWN_PAYMENT_METHODS = {
     "xendit directdebit", "unknown",
 }
 
+# every order_id and customer_id in _base is 10 characters. used to put back leading
+# zeros if an id column was read as numbers ("0000123456" -> 123456 -> "0000123456").
+ID_LENGTH = 10
+
+# every row must have these to be joined. nulls would match each other in a pandas merge.
+CUSTOMER_REQUIRED_KEYS = CUSTOMER_KEY
+ORDER_REQUIRED_KEYS = ORDER_KEY
+LABEL_REQUIRED_KEYS = ["country_code", "order_id", "customer_id"]
+
+# columns kept in the reject log so a rejected row can be found again.
+REJECT_COLUMNS = ["table", "reason", "source_row", "country_code", "order_id", "customer_id"]
+
 # different wordings of the same value (case, spaces, "-" and "_" are already handled).
 BOOL_VALUES = {
     "true": True, "yes": True, "y": True, "t": True, "1": True,
@@ -108,6 +123,96 @@ SKEWED_COLUMNS = [
 ]
 
 
+
+# log file: everything cleaning and checks report, with a timestamp, saved to logs/.
+
+PACKAGE_LOGGER = logging.getLogger("amlop_ca1")
+LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
+
+
+def log_to_file(log_dir="logs", batch="base"):
+    """also write every cleaning message to <log_dir>/cleaning_<batch>_<time>.log and return its path.
+
+    calling it again (e.g. re-running a notebook cell) switches to a new file instead of
+    writing every line twice.
+    """
+    stop_log_file()
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / f"cleaning_{batch}_{datetime.now():%Y%m%d_%H%M%S}.log"
+
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt="%Y-%m-%d %H:%M:%S"))
+    handler.amlop_log_file = True  # marks the handlers this module added
+    PACKAGE_LOGGER.addHandler(handler)
+    if PACKAGE_LOGGER.getEffectiveLevel() > logging.INFO:
+        PACKAGE_LOGGER.setLevel(logging.INFO)
+
+    logger.info("batch %s: logging to %s", batch, path)
+    return path
+
+
+def stop_log_file():
+    """stop writing to the log file started by log_to_file, and close it."""
+    for handler in list(PACKAGE_LOGGER.handlers):
+        if getattr(handler, "amlop_log_file", False):
+            PACKAGE_LOGGER.removeHandler(handler)
+            handler.close()
+
+
+def load_csv(path):
+    """read one sp-buy csv with ids as text. low_memory=False looks at the whole column before picking types."""
+    return pd.read_csv(path, dtype=CSV_DTYPES, low_memory=False)
+
+
+def load_batch(data_dir, batch):
+    """read customers_<batch>.csv, orders_<batch>.csv and labels_<batch>.csv from data_dir."""
+    data_dir = Path(data_dir)
+    return tuple(load_csv(data_dir / f"{name}_{batch}.csv") for name in ("customers", "orders", "labels"))
+
+
+# log severy row dropped by cleaning or merging with reasoning
+class RejectLog:
+
+    def __init__(self):
+        self._parts = []
+
+    def add(self, table, rows, reason):
+        """record rows (a dataframe) as rejected. reason is a string or one string per row."""
+        if rows.empty:
+            return
+        part = rows.reindex(columns=REJECT_COLUMNS[3:]).astype("string").reset_index(drop=True)
+        part.insert(0, "source_row", rows.index.to_numpy())
+        part.insert(0, "reason", pd.array(np.broadcast_to(np.asarray(reason, dtype=object), len(rows)), dtype="string"))
+        part.insert(0, "table", table)
+        self._parts.append(part)
+
+    def to_frame(self):
+        """one row per rejected record."""
+        if not self._parts:
+            return pd.DataFrame({column: pd.Series(dtype="string") for column in REJECT_COLUMNS})
+        return pd.concat(self._parts, ignore_index=True)
+
+    def summary(self):
+        """rejected rows counted by table and reason."""
+        frame = self.to_frame()
+        return frame.groupby(["table", "reason"], sort=False).size().rename("rows").reset_index()
+    def __len__(self):
+        return sum(len(part) for part in self._parts)
+
+
+def reject(rejects, table, rows, reason, log=True):
+    """log rejected rows and add them to the reject log, if there is one."""
+    if rows.empty:
+        return
+    if log:
+        reasons = pd.Series(np.broadcast_to(np.asarray(reason, dtype=object), len(rows)))
+        for text, count in reasons.value_counts().items():
+            logger.warning("%s: rejected %d rows: %s", table, count, text)
+    if rejects is not None:
+        rejects.add(table, rows, reason)
+
+
 # text helpers: tidy up text values so different spellings match.
 
 def normalise_text(values):
@@ -119,8 +224,45 @@ def normalise_text(values):
 
 
 def uppercase_code(values):
-    """trim and uppercase: " pk" -> "PK"."""
-    return values.astype("string").str.strip().str.upper()
+    """trim and uppercase: " pk" -> "PK". blank becomes na."""
+    code = values.astype("string").str.strip().str.upper()
+    return code.mask(code == "")
+
+
+def clean_country(column, name):
+    country = clean_distinct_values(column, uppercase_code).astype("string")
+    warn_about_new_values(country, KNOWN_COUNTRIES, name)
+    return country
+
+
+def clean_id(column, name):
+    """trim an id column; blank becomes na. ids read as numbers get their leading zeros back."""
+    if pd.api.types.is_numeric_dtype(column):
+        return restore_numeric_ids(column, name)
+    ids = column.astype("string").str.strip()
+    return ids.mask(ids == "")
+
+
+def restore_numeric_ids(column, name):
+    """turn ids that were read as numbers back into text, padded to ID_LENGTH.
+
+    123456 (or 123456.0) -> "0000123456". a value that can't be an id (a decimal,
+    infinity, more than ID_LENGTH digits) becomes na, so the row is rejected as a missing key.
+    """
+    numbers = pd.to_numeric(column, errors="coerce").astype("Float64")
+    whole = numbers.notna() & np.isfinite(numbers.fillna(0)) & (numbers % 1 == 0) & (numbers >= 0)
+    digits = numbers.where(whole).astype("Int64").astype("string")
+    restorable = digits.notna() & (digits.str.len() <= ID_LENGTH)
+
+    ids = digits.where(restorable).str.zfill(ID_LENGTH)
+    padded = (restorable & (digits.str.len() < ID_LENGTH)).sum()
+    logger.warning("%s was read as numbers (%s); restored %d ids, %d needed leading zeros put back. "
+                   "load csvs with cleaning.load_csv to avoid this", name, column.dtype, restorable.sum(), padded)
+    lost = column.notna() & ~restorable
+    if lost.any():
+        logger.warning("%s: %d values can't be restored as ids, e.g. %s; set to missing",
+                       name, lost.sum(), column[lost].head(3).tolist())
+    return ids.astype("string")
 
 
 def clean_distinct_values(column, clean_function):
@@ -165,6 +307,21 @@ def parse_dates(column, formats):
     return parsed
 
 
+def parse_and_flag_dates(df, column, formats, flag, table):
+    """parse a date column in place and add a 0/1 flag for values that were there but couldn't be parsed.
+
+    missing values are not flagged; only values in a format we don't know.
+    """
+    raw = df[column]
+    df[column] = parse_dates(raw, formats)
+    invalid = raw.notna() & df[column].isna()
+    df[flag] = invalid.astype("int8")
+    if invalid.any():
+        examples = raw[invalid].astype("string").drop_duplicates().head(5).tolist()
+        logger.warning("%s.%s: %d values in an unknown format flagged in %s, e.g. %s",
+                       table, column, invalid.sum(), flag, examples)
+
+
 def convert_to_numbers(df, columns, table):
     """convert columns to numbers in place. anything that isn't a number becomes nan."""
     for column in columns:
@@ -183,29 +340,116 @@ def check_columns(df, columns, table):
         raise ValueError(f"{table} is missing columns: {missing}")
 
 
-def drop_duplicate_keys(df, key, table):
-    duplicated = df.duplicated(subset=key, keep="first")
-    if duplicated.any():
-        logger.warning("%s: dropped %d rows with a duplicate %s", table, duplicated.sum(), key)
-    return df[~duplicated]
+def drop_missing_keys(df, columns, table, rejects):
+    """reject rows missing any key column. reason names the missing columns."""
+    missing = df[columns].isna()
+    has_missing = missing.any(axis=1).to_numpy()
+    if not has_missing.any():
+        return df
+    reasons = [
+        "missing " + ", ".join(np.array(columns)[row]) for row in missing.to_numpy()[has_missing]
+    ]
+    reject(rejects, table, df[has_missing], reasons)
+    return df[~has_missing]
 
 
-def check_unique(df, key, table):
+def resolve_duplicate_keys(df, key, table, rejects):
+    """exact copies of a row become one row. copies that disagree are all rejected,
+    since there's no way to tell which one is right (e.g. is_fraud 0 and 1 for one order).
+    """
+    same_key = df.duplicated(subset=key, keep=False).to_numpy()
+    if not same_key.any():
+        return df
+
+    positions = np.flatnonzero(same_key)
+    copies = df.iloc[positions]
+    key_name = f"({', '.join(key)})"
+
+    exact = copies.duplicated(keep="first").to_numpy()
+    if exact.any():
+        extra = copies[exact]
+        logger.warning(
+            "%s: detected %d %s key(s) with exact duplicate rows, e.g. %s; dropped %d extra copies, kept one of each",
+            table, len(extra[key].drop_duplicates()), key_name, examples(extra, key), len(extra),
+        )
+        reject(rejects, table, extra, "exact duplicate", log=False)
+
+    remaining = copies[~exact]
+    conflicting = remaining.duplicated(subset=key, keep=False).to_numpy()
+    conflicts = remaining[conflicting]
+    if not conflicts.empty:
+        # which columns differ within each key, e.g. "is_fraud".
+        value_columns = [column for column in df.columns if column not in key]
+        differs = conflicts.groupby(key)[value_columns].nunique(dropna=False).gt(1)
+        differing = differs.apply(lambda row: ", ".join(row.index[row]), axis=1).rename("differs")
+        per_row = conflicts[key].merge(differing.reset_index(), on=key, how="left")["differs"]
+        for columns, count in differing.value_counts().items():
+            group = conflicts[(per_row == columns).to_numpy()]
+            logger.warning(
+                "%s: detected %d %s key(s) with conflicting values in %s, e.g. %s; dropped all %d rows",
+                table, count, key_name, columns, examples(group, key), len(group),
+            )
+        reject(rejects, table, conflicts, ("conflicting duplicate: " + per_row).tolist(), log=False)
+
+    drop = np.zeros(len(df), dtype=bool)
+    drop[positions[exact]] = True
+    drop[positions[~exact][conflicting]] = True
+    return df[~drop]
+
+
+def examples(rows, key, limit=3):
+    """a few keys as text for log messages, e.g. "PH/o1 (row 0), MY/o7 (row 12)"."""
+    shown = rows.drop_duplicates(subset=key).head(limit)
+    keys = shown[key].astype("string").agg("/".join, axis=1)
+    return ", ".join(f"{text} (row {row})" for text, row in zip(keys, shown.index))
+
+
+def check_no_missing_keys(df, required, table):
+    """raise if a key value is missing: pandas would join a missing id to another missing id."""
+    missing = df[required].isna().any(axis=1).sum()
+    if missing:
+        raise ValueError(f"{table} has {missing} rows with a missing {required}; clean it before merging")
+
+
+def drop_repeated_keys(df, key, table, rejects):
+    """reject every row whose key appears more than once, so a join can't pick one of them.
+
+    clean_* already removes these, so this only fires for tables that skipped cleaning.
+    """
     # faster than merge(validate=...) on 1m rows.
-    if df.duplicated(subset=key).any():
-        raise ValueError(f"{table} has duplicate {key}; clean it before merging")
+    repeated = df.duplicated(subset=key, keep=False).to_numpy()
+    if not repeated.any():
+        return df
+    rows = df[repeated]
+    logger.warning(
+        "%s: detected %d (%s) key(s) repeated at merge, e.g. %s; dropped all %d rows",
+        table, len(rows[key].drop_duplicates()), ", ".join(key), examples(rows, key), len(rows),
+    )
+    reject(rejects, table, rows, "repeated key at merge", log=False)
+    return df[~repeated]
+
+
+def key_isin(left, right, key):
+    """for each row in left, true if the same key exists in right. a missing key never matches."""
+    right_keys = right[key].astype("string").dropna().drop_duplicates()
+    left_keys = left[key].astype("string")
+    matched = left_keys.merge(right_keys, on=key, how="left", indicator=True)
+    return (matched["_merge"] == "both").to_numpy() & left_keys.notna().all(axis=1).to_numpy()
 
 
 # customers: uppercase country, real true/false, parse dates, flag missing first order.
 
-def clean_customers(df):
-    """return a cleaned copy of a customers table."""
+def clean_customers(df, rejects=None):
+    """return a cleaned copy of a customers table. dropped rows go to rejects (a RejectLog).
+
+    the index is kept, so it still points at the row in the raw table.
+    """
     check_columns(df, CUSTOMER_COLUMNS, "customers")
     customers = df.copy()
 
-    customers["country_code"] = clean_distinct_values(customers["country_code"], uppercase_code).astype("string")
-    warn_about_new_values(customers["country_code"], KNOWN_COUNTRIES, "customers.country_code")
-    customers["customer_id"] = customers["customer_id"].astype("string").str.strip()
+    customers["country_code"] = clean_country(customers["country_code"], "customers.country_code")
+    customers["customer_id"] = clean_id(customers["customer_id"], "customers.customer_id")
+    customers = drop_missing_keys(customers, CUSTOMER_REQUIRED_KEYS, "customers", rejects)
 
     # "yes", "True", true etc. become a real boolean; anything unrecognised becomes na.
     verified_text = clean_distinct_values(customers["mobile_verified"], normalise_text)
@@ -216,32 +460,32 @@ def clean_customers(df):
 
     convert_to_numbers(customers, CUSTOMER_NUMERIC, "customers")
 
-    raw_first_order = customers["first_order_datetime"]
-    customers["first_order_datetime"] = parse_dates(raw_first_order, CUSTOMER_DATETIME_FORMATS)
-    unparsed = (raw_first_order.notna() & customers["first_order_datetime"].isna()).sum()
-    if unparsed:
-        logger.warning("customers.first_order_datetime: %d values could not be parsed", unparsed)
-
     # missing first order date is a fraud signal (24% vs 11%), so keep the rows and flag them.
     customers["first_order_missing"] = customers["first_order_datetime"].isna().astype("int8")
+    # a date in a format we don't know is kept as nat and flagged separately.
+    parse_and_flag_dates(customers, "first_order_datetime", CUSTOMER_DATETIME_FORMATS,
+                         "first_order_invalid", "customers")
 
-    customers = drop_duplicate_keys(customers, CUSTOMER_KEY, "customers")
-    logger.info("customers: %d rows, %d with no first_order_datetime",
-                len(customers), customers["first_order_missing"].sum())
-    return customers.reset_index(drop=True)
+    customers = resolve_duplicate_keys(customers, CUSTOMER_KEY, "customers", rejects)
+    logger.info("customers: %d rows, %d with no first_order_datetime, %d with an invalid one",
+                len(customers), customers["first_order_missing"].sum(), customers["first_order_invalid"].sum())
+    return customers
 
 
 # orders: one spelling per value, fill missing payment, drop incomplete rows, parse dates.
 # outliers and refund_value are kept on purpose.
 
-def clean_orders(df):
-    """return a cleaned copy of an orders table."""
+def clean_orders(df, rejects=None):
+    """return a cleaned copy of an orders table. dropped rows go to rejects (a RejectLog).
+
+    the index is kept, so it still points at the row in the raw table.
+    """
     check_columns(df, ORDER_COLUMNS, "orders")
     orders = df.copy()
 
-    orders["country_code"] = clean_distinct_values(orders["country_code"], uppercase_code).astype("string")
-    warn_about_new_values(orders["country_code"], KNOWN_COUNTRIES, "orders.country_code")
-    orders["order_id"] = orders["order_id"].astype("string").str.strip()
+    orders["country_code"] = clean_country(orders["country_code"], "orders.country_code")
+    orders["order_id"] = clean_id(orders["order_id"], "orders.order_id")
+    orders = drop_missing_keys(orders, ORDER_REQUIRED_KEYS, "orders", rejects)
 
     orders["collect_type"] = canonicalise(
         orders["collect_type"], COLLECT_TYPE_ALIASES, KNOWN_COLLECT_TYPES, "orders.collect_type"
@@ -256,76 +500,109 @@ def clean_orders(df):
 
     convert_to_numbers(orders, ORDER_NUMERIC, "orders")
     incomplete = orders[ORDER_REQUIRED].isna().any(axis=1)
-    if incomplete.any():
-        logger.warning("orders: dropped %d rows missing %s", incomplete.sum(), ORDER_REQUIRED)
-        orders = orders[~incomplete]
+    reject(rejects, "orders", orders[incomplete], f"missing {', '.join(ORDER_REQUIRED)}")
+    orders = orders[~incomplete]
 
-    raw_date = orders["order_date"]
-    orders["order_date"] = parse_dates(raw_date, ORDER_DATE_FORMATS)
-    unparsed = (raw_date.notna() & orders["order_date"].isna()).sum()
-    if unparsed:
-        logger.warning("orders.order_date: %d values could not be parsed", unparsed)
+    parse_and_flag_dates(orders, "order_date", ORDER_DATE_FORMATS, "order_date_invalid", "orders")
 
-    orders = drop_duplicate_keys(orders, ORDER_KEY, "orders")
-    logger.info("orders: %d rows", len(orders))
-    return orders.reset_index(drop=True)
+    orders = resolve_duplicate_keys(orders, ORDER_KEY, "orders", rejects)
+    logger.info("orders: %d rows, %d with an invalid order_date", len(orders), orders["order_date_invalid"].sum())
+    return orders
 
 
 # labels: uppercase country, keep only is_fraud 0 or 1.
 
-def clean_labels(df):
-    """return a cleaned copy of a labels table."""
+def clean_labels(df, rejects=None):
+    """return a cleaned copy of a labels table. dropped rows go to rejects (a RejectLog).
+
+    the index is kept, so it still points at the row in the raw table.
+    """
     check_columns(df, LABEL_COLUMNS, "labels")
     labels = df.copy()
 
-    labels["country_code"] = clean_distinct_values(labels["country_code"], uppercase_code).astype("string")
-    warn_about_new_values(labels["country_code"], KNOWN_COUNTRIES, "labels.country_code")
-    labels["order_id"] = labels["order_id"].astype("string").str.strip()
-    labels["customer_id"] = labels["customer_id"].astype("string").str.strip()
+    labels["country_code"] = clean_country(labels["country_code"], "labels.country_code")
+    labels["order_id"] = clean_id(labels["order_id"], "labels.order_id")
+    labels["customer_id"] = clean_id(labels["customer_id"], "labels.customer_id")
+    labels = drop_missing_keys(labels, LABEL_REQUIRED_KEYS, "labels", rejects)
 
-    labels["is_fraud"] = pd.to_numeric(labels["is_fraud"], errors="coerce")
-    bad_label = ~labels["is_fraud"].isin([0, 1])
-    if bad_label.any():
-        logger.warning("labels: dropped %d rows where is_fraud is not 0 or 1", bad_label.sum())
-        labels = labels[~bad_label]
-    labels["is_fraud"] = labels["is_fraud"].astype("int8")
+    is_fraud = pd.to_numeric(labels["is_fraud"], errors="coerce")
+    bad_label = ~is_fraud.isin([0, 1])
+    reject(rejects, "labels", labels[bad_label], "is_fraud not 0 or 1")
+    labels = labels[~bad_label].assign(is_fraud=is_fraud[~bad_label].astype("int8"))
 
-    labels = drop_duplicate_keys(labels, ORDER_KEY, "labels")
+    # one order with is_fraud 0 and 1 (or two customers) is rejected, not guessed.
+    labels = resolve_duplicate_keys(labels, ORDER_KEY, "labels", rejects)
     logger.info("labels: %d rows, fraud rate %.2f%%", len(labels), 100 * labels["is_fraud"].mean())
-    return labels.reset_index(drop=True)
+    return labels
 
 
-# merge: one row per labelled order. rows that can't be matched are dropped and counted.
+# merge: one row per labelled order. rows that can't be matched go to the reject log.
 
-def merge_all(customers, orders, labels):
-    """join labels -> orders -> customers. counts of dropped rows go in merged.attrs["join_stats"]."""
-    check_unique(labels, ORDER_KEY, "labels")
-    check_unique(orders, ORDER_KEY, "orders")
-    check_unique(customers, CUSTOMER_KEY, "customers")
+def merge_all(customers, orders, labels, rejects=None):
+    """join labels -> orders -> customers.
 
-    labels_with_orders = labels.merge(orders, on=ORDER_KEY, how="inner")
-    merged = labels_with_orders.merge(customers, on=CUSTOMER_KEY, how="inner")
+    rows with a repeated key, labels with no order or no customer, and orders or
+    customers that don't end up in the result are added to rejects (a RejectLog).
+    counts go in merged.attrs["join_stats"].
+    """
+    check_no_missing_keys(labels, LABEL_REQUIRED_KEYS, "labels")
+    check_no_missing_keys(orders, ORDER_REQUIRED_KEYS, "orders")
+    check_no_missing_keys(customers, CUSTOMER_REQUIRED_KEYS, "customers")
+
+    labels = drop_repeated_keys(labels, ORDER_KEY, "labels", rejects)
+    orders = drop_repeated_keys(orders, ORDER_KEY, "orders", rejects)
+    customers = drop_repeated_keys(customers, CUSTOMER_KEY, "customers", rejects)
+
+    has_order = key_isin(labels, orders, ORDER_KEY)
+    reject(rejects, "labels", labels[~has_order], "no matching order")
+    labels_with_orders = labels[has_order]
+
+    has_customer = key_isin(labels_with_orders, customers, CUSTOMER_KEY)
+    reject(rejects, "labels", labels_with_orders[~has_customer], "no matching customer")
+
+    used_labels = labels_with_orders[has_customer]
+
+    # orders and customers that don't end up in the merged table, and why.
+    order_has_label = key_isin(orders, labels, ORDER_KEY)
+    order_used = key_isin(orders, used_labels, ORDER_KEY)
+    reject(rejects, "orders", orders[~order_has_label], "no matching label")
+    reject(rejects, "orders", orders[order_has_label & ~order_used], "label has no matching customer")
+
+    customer_has_label = key_isin(customers, labels, CUSTOMER_KEY)
+    customer_used = key_isin(customers, used_labels, CUSTOMER_KEY)
+    reject(rejects, "customers", customers[~customer_has_label], "no matching label")
+    reject(rejects, "customers", customers[customer_has_label & ~customer_used], "labels have no matching order")
+
+    merged = (
+        used_labels
+        .merge(orders, on=ORDER_KEY, how="inner")
+        .merge(customers, on=CUSTOMER_KEY, how="inner")
+    )
 
     stats = {
         "labels_in": len(labels),
-        "labels_without_order": len(labels) - len(labels_with_orders),
-        "labels_without_customer": len(labels_with_orders) - len(merged),
-        "orders_without_label": len(orders) - len(labels_with_orders),
+        "labels_without_order": int((~has_order).sum()),
+        "labels_without_customer": int((~has_customer).sum()),
+        "orders_without_label": int((~order_has_label).sum()),
+        "customers_without_label": int((~customer_has_label).sum()),
         "rows_out": len(merged),
     }
     logger.info(
         "merge: %d labels -> %d rows (dropped %d with no order and %d with no customer; "
-        "%d orders had no label)",
+        "%d orders and %d customers had no label)",
         stats["labels_in"], stats["rows_out"], stats["labels_without_order"],
-        stats["labels_without_customer"], stats["orders_without_label"],
+        stats["labels_without_customer"], stats["orders_without_label"], stats["customers_without_label"],
     )
     merged.attrs["join_stats"] = stats
     return merged
 
 
-def clean_and_merge(customers, orders, labels):
-    """clean the three raw tables and merge them in one go."""
-    return merge_all(clean_customers(customers), clean_orders(orders), clean_labels(labels))
+def clean_and_merge(customers, orders, labels, rejects=None):
+    """clean the three raw tables and merge them in one go. pass a RejectLog to see what was dropped."""
+    return merge_all(
+        clean_customers(customers, rejects), clean_orders(orders, rejects), clean_labels(labels, rejects),
+        rejects,
+    )
 
 
 # transform: log versions of skewed columns for models that need them.

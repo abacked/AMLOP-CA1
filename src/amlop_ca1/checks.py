@@ -6,8 +6,9 @@ run on raw tables to find issues, and on cleaned tables to show they're fixed.
 import pandas as pd
 
 from amlop_ca1.cleaning import (
-    COLLECT_TYPE_ALIASES, CUSTOMER_KEY, ORDER_DATE_FORMATS, ORDER_KEY,
-    PAYMENT_METHOD_ALIASES, normalise_text, parse_dates,
+    COLLECT_TYPE_ALIASES, CUSTOMER_KEY, CUSTOMER_REQUIRED_KEYS, LABEL_REQUIRED_KEYS,
+    ORDER_DATE_FORMATS, ORDER_KEY, ORDER_REQUIRED_KEYS, PAYMENT_METHOD_ALIASES,
+    key_isin, normalise_text, parse_dates,
 )
 
 
@@ -52,9 +53,14 @@ def check_issues(customers, orders, labels):
 
     # keys.
     add("orders", "order_id", "reused across countries", orders["order_id"].duplicated().sum())
-    add("customers", "(country_code, customer_id)", "duplicate key", customers.duplicated(CUSTOMER_KEY).sum())
-    add("orders", "(country_code, order_id)", "duplicate key", orders.duplicated(ORDER_KEY).sum())
-    add("labels", "(country_code, order_id)", "duplicate key", labels.duplicated(ORDER_KEY).sum())
+    for name, table, key, required in [
+        ("customers", customers, CUSTOMER_KEY, CUSTOMER_REQUIRED_KEYS),
+        ("orders", orders, ORDER_KEY, ORDER_REQUIRED_KEYS),
+        ("labels", labels, ORDER_KEY, LABEL_REQUIRED_KEYS),
+    ]:
+        add(name, f"({', '.join(required)})", "missing key", count_missing_keys(table, required))
+        add(name, f"({', '.join(key)})", "duplicate key", table.duplicated(key).sum())
+        add(name, f"({', '.join(key)})", "conflicting duplicate key", count_conflicting_duplicates(table, key))
 
     # rows that won't find a partner when joining.
     add("labels", "(country_code, order_id)", "no matching order",
@@ -83,9 +89,80 @@ def count_minority_spellings(column, aliases):
     return int((rows_per_meaning - rows_in_top_spelling).sum())
 
 
-def key_isin(left, right, key):
-    """for each row in left, true if the same key exists in right."""
-    right_keys = right[key].astype("string").drop_duplicates()
-    left_keys = left[key].astype("string")
-    matched = left_keys.merge(right_keys, on=key, how="left", indicator=True)
-    return (matched["_merge"] == "both").to_numpy()
+def count_missing_keys(table, columns):
+    """rows with any key column missing or blank."""
+    keys = table[columns].astype("string").apply(lambda column: column.str.strip())
+    return int((keys.isna() | (keys == "")).any(axis=1).sum())
+
+
+def count_conflicting_duplicates(table, key):
+    """rows sharing a key with another row that has different values (exact copies don't count)."""
+    same_key = table[table.duplicated(key, keep=False)]
+    distinct = same_key.drop_duplicates()
+    return int(distinct.duplicated(key, keep=False).sum())
+
+
+# profiles: the shape of a table without printing its rows.
+
+def value_pattern(values):
+    """the shape of each value: digits become 9, letters a or A. "2023/04/09" -> "9999/99/99", "PK" -> "AA"."""
+    pattern = values.astype("string").str.replace(r"[0-9]", "9", regex=True)
+    pattern = pattern.str.replace(r"[a-z]", "a", regex=True)
+    return pattern.str.replace(r"[A-Z]", "A", regex=True)
+
+
+def profile_table(df, max_formats=3, max_values=4, category_limit=30):
+    """one row per column: dtype, nulls, distinct values and what the values look like.
+
+    shows formats or a range, never the rows themselves:
+      text with <= category_limit values -> the values, e.g. "delivery (1,990), pickup (10)"
+      other text           -> the formats, e.g. "9999/99/99 (1,995), 9999-99-99 (5)"
+      numbers and dates    -> the range, e.g. "0.0 .. 662.9"
+    """
+    rows = []
+    for column in df.columns:
+        values = df[column]
+        present = values.dropna()
+        rows.append({
+            "column": column,
+            "dtype": str(values.dtype),
+            "nulls": int(values.isna().sum()),
+            "distinct": int(present.nunique()),
+            "looks like": describe_values(values, present, max_formats, max_values, category_limit),
+        })
+    return pd.DataFrame(rows)
+
+
+def describe_values(values, present, max_formats, max_values, category_limit):
+    if present.empty:
+        return "(all missing)"
+    if pd.api.types.is_bool_dtype(values) or present.nunique() <= max_values:
+        return counts_text(present.astype("string").value_counts(), max_values)
+    if pd.api.types.is_numeric_dtype(values):
+        return f"{present.min():.4g} .. {present.max():.4g}"
+    if pd.api.types.is_datetime64_any_dtype(values):
+        return f"{present.min():%Y-%m-%d} .. {present.max():%Y-%m-%d}"
+
+    if present.nunique() <= category_limit:
+        return counts_text(present.astype("string").value_counts(), max_values)
+
+    patterns = value_pattern(present).value_counts()
+    if len(patterns) > 10:
+        # ids: too many formats to list, so show their lengths instead.
+        lengths = present.astype("string").str.len().value_counts()
+        return f"{len(patterns):,} formats; length " + counts_text(lengths, max_formats)
+    text = counts_text(patterns, max_formats)
+    # show a few odd values too: whitespace and case don't show up in a pattern.
+    padded = (present.astype("string") != present.astype("string").str.strip()).sum()
+    return text + (f"; {padded:,} with spaces around" if padded else "")
+
+
+def counts_text(counts, limit):
+    shown = ", ".join(f"{value!r} ({count:,})" if isinstance(value, str) else f"{value} ({count:,})"
+                      for value, count in counts.head(limit).items())
+    return shown + (f", +{len(counts) - limit} more" if len(counts) > limit else "")
+
+
+def issue_count(mask):
+    """how many rows a true/false check flags. missing counts as false."""
+    return int(pd.Series(mask).fillna(False).astype(bool).sum())
