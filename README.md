@@ -43,6 +43,17 @@ The feature builder preserves row order and ignores targets, identifiers, refund
 
 This implements the order-feature preprocessing portion of PBI-02. Skew-transform experiments, model class weighting, temporal evaluation, and the cleaning/join checks remain separate work; PBI-02 should stay open.
 
+### Cleaning integration tests
+
+`tests/test_cleaning_features_integration.py` tests a synthetic future-style three-file batch through cleaning and feature preprocessing. It runs automatically once `src/amlop_ca1/cleaning.py` is available. Until PR #13 is merged, point it to a reviewed checkout without copying unmerged files into this branch:
+
+```powershell
+$env:AMLOP_CLEANING_MODULE = 'C:\path\to\reviewed-checkout\src\amlop_ca1\cleaning.py'
+.\.venv\Scripts\python.exe -m pytest tests -q -W error
+```
+
+Without a cleaning module, the four integration tests skip explicitly; the feature tests still run. An explicitly configured path that does not exist fails. Coverage includes composite keys, nullable values, dates, rejected rows, row alignment, label-free inference, predictor exclusions and training-only fitted state. This verifies compatibility; it does not merge PR #13 or replace temporal model evaluation.
+
 ## Team workflow
 
 1. Refine the Product Backlog Items in GitHub Issues during the Week 3 requirements meeting. Set estimates with the team.
