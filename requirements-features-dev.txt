@@ -1,0 +1,2 @@
+-r requirements-features.txt
+pytest==9.2.0
