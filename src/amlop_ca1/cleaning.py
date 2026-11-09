@@ -323,13 +323,22 @@ def parse_and_flag_dates(df, column, formats, flag, table):
 
 
 def convert_to_numbers(df, columns, table):
-    """convert columns to numbers in place. anything that isn't a number becomes nan."""
+    """Coerce invalid, nonfinite and negative measurements to missing.
+
+    Counts must be whole numbers. Orders missing required measurements are
+    rejected by clean_orders; optional fields retain missing values. This is
+    validation, not learned imputation or feature engineering.
+    """
     for column in columns:
         was_present = df[column].notna()
         df[column] = pd.to_numeric(df[column], errors="coerce")
+        invalid = ~np.isfinite(df[column]) | (df[column] < 0)
+        if column.startswith("num_"):
+            invalid |= df[column].notna() & (df[column] % 1 != 0)
+        df[column] = df[column].mask(invalid)
         broken = (was_present & df[column].isna()).sum()
         if broken:
-            logger.warning("%s.%s: %d non-numeric values set to NaN", table, column, broken)
+            logger.warning("%s.%s: %d invalid numeric measurements set to NaN", table, column, broken)
 
 
 # row and column checks.
@@ -405,8 +414,11 @@ def examples(rows, key, limit=3):
 
 
 def check_no_missing_keys(df, required, table):
-    """raise if a key value is missing: pandas would join a missing id to another missing id."""
-    missing = df[required].isna().any(axis=1).sum()
+    """Reject null or blank keys even when callers bypass clean_* functions."""
+    missing = pd.concat([
+        df[column].isna() | df[column].astype("string").str.strip().eq("").fillna(False)
+        for column in required
+    ], axis=1).any(axis=1).sum()
     if missing:
         raise ValueError(f"{table} has {missing} rows with a missing {required}; clean it before merging")
 

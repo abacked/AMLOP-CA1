@@ -1,0 +1,11 @@
+# Cleaning contract for future batches
+
+Use load_csv or load_batch to preserve identifiers as text. Numeric ID recovery is a compatibility path for base-style ten-digit IDs only; future identifiers with unknown widths cannot be reconstructed reliably after numeric inference. Do not use this fallback to infer an unknown schema.
+
+clean_customers, clean_orders and clean_labels return copies and normalize category aliases and dates without fitting population statistics. Null and blank composite keys are rejected. Identical duplicate rows collapse to one; all conflicting key variants are quarantined in RejectLog. merge_all additionally rejects null/blank keys and repeated keys to prevent unsafe direct merges. Input tables passed directly to merge_all must otherwise already have canonical country codes, text identifiers and validated schemas. Joins use country plus order/customer ID; they must never use a bare identifier.
+
+Nonnumeric, nonfinite or negative amounts/counts become missing; fractional counts become missing. Required missing order value/item count rejects the order, while optional customer/refund measurements remain missing. Zero is valid. Refunds larger than order values remain available for retrospective anomaly analysis: their business meaning is unresolved. These decisions do not impute values or establish model feature eligibility.
+
+Record every rejected source row and reason, plus join_stats. Missing categories and invalid dates can remain nullable; date flags distinguish failed parsing from source absence. A batch with a missing required column fails explicitly. Raw CSVs are never rewritten.
+
+Customer activity fields have no verified as-of timestamp, and refund recording time is not established by an observed correlation. Exclude both from pre-shipment predictors. first_order_missing is retained as a data-quality flag; it is not automatically a safe predictor. Feature imputation, encoding, scaling and optional transformations are fitted only on training rows in the independent feature pipeline. add_log_features is exploratory only and its output must not bypass that allowlist. Temporal splitting, imbalance experiments and historical snapshots remain later tasks.
