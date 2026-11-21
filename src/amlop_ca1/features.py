@@ -1,8 +1,17 @@
-"""Order features available before shipment, independent of the cleaning module.
+"""Order features available before shipment, using the shared cleaning date parser.
 
 Requires pandas >= 2.0, numpy and scikit-learn >= 1.2. Pass a DataFrame with
 REQUIRED_COLUMNS; extra columns are ignored. Category aliases and joins belong
 to cleaning.py. This module performs only feature-level validation.
+
+Eligible predictors are order value, item count, country, collection type,
+payment method, value per item and order weekday. Order month is excluded:
+the base data spans November-May, with no temporal validation supporting it.
+No customer attributes are eligible in this baseline. mobile_verified needs
+a verification timestamp; account age needs a first-order date known at the
+prediction time. The supplied customer snapshot establishes neither. Activity
+windows, associated-customer counts and missing-history flags also remain
+excluded until their point-in-time availability is verified.
 
 Split rows before calling ``make_feature_pipeline().fit(X_train)``. Call only
 ``transform`` on validation, test and inference rows, and save the fitted
@@ -26,6 +35,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.utils.validation import check_is_fitted
 
+from amlop_ca1.cleaning import ORDER_DATE_FORMATS, parse_dates
+
 
 REQUIRED_COLUMNS = (
     "order_value", "num_items_ordered", "country_code", "collect_type",
@@ -33,11 +44,10 @@ REQUIRED_COLUMNS = (
 )
 NUMERIC_FEATURES = (
     "order_value", "num_items_ordered", "value_per_item", "order_weekday",
-    "order_month",
 )
 CATEGORICAL_FEATURES = ("country_code", "collect_type", "payment_method")
 FEATURE_COLUMNS = NUMERIC_FEATURES + CATEGORICAL_FEATURES
-DATE_FORMATS = ("%Y/%m/%d", "%Y-%m-%d", "%Y/%b/%d", "%Y/%B/%d")
+DATE_FORMATS = tuple(ORDER_DATE_FORMATS)
 # Leave ample float64 headroom for sums, medians and squared scaling terms.
 MAX_NUMERIC_VALUE = 1e100
 
@@ -55,6 +65,8 @@ def _validate_frame(frame):
 
 
 def _nonnegative_numbers(values, *, whole=False):
+    # Match cleaning.convert_to_numbers on negative/nonfinite values and counts.
+    # Keep feature-level type/overflow guards for direct and label-free callers.
     # Avoid interpreting timestamps as epoch numbers or discarding imaginary parts.
     invalid_types = (
         bool, np.bool_, complex, np.complexfloating, date, time, timedelta,
@@ -76,13 +88,7 @@ def _nonnegative_numbers(values, *, whole=False):
 
 
 def _dates(values):
-    if pd.api.types.is_datetime64_any_dtype(values):
-        return values
-    text = values.astype("string").str.strip()
-    parsed = pd.to_datetime(text, format=DATE_FORMATS[0], errors="coerce")
-    for date_format in DATE_FORMATS[1:]:
-        parsed = parsed.fillna(pd.to_datetime(text, format=date_format, errors="coerce"))
-    return parsed
+    return parse_dates(values, DATE_FORMATS)
 
 
 class OrderFeatures(TransformerMixin, BaseEstimator):
@@ -90,7 +96,7 @@ class OrderFeatures(TransformerMixin, BaseEstimator):
 
     Invalid numbers/dates become missing for downstream imputation. Zero item
     counts are retained, but their value_per_item is missing. Weekday is 0=Monday
-    through 6=Sunday; month is 1..12. Ambiguous or unsupported text dates become
+    through 6=Sunday. Ambiguous or unsupported text dates become
     missing rather than being guessed. Numeric date values are not epoch times.
     """
 
@@ -115,7 +121,6 @@ class OrderFeatures(TransformerMixin, BaseEstimator):
         result["value_per_item"] = ratio
         dates = _dates(X["order_date"])
         result["order_weekday"] = dates.dt.day_of_week.to_numpy(dtype=float, na_value=np.nan)
-        result["order_month"] = dates.dt.month.to_numpy(dtype=float, na_value=np.nan)
         for column in CATEGORICAL_FEATURES:
             # object + np.nan is compatible with sklearn's categorical imputer.
             values = X[column].map(

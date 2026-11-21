@@ -1,11 +1,4 @@
-"""Synthetic batch contract for PR #13 and feature preprocessing.
-
-Once cleaning.py is merged these tests run automatically. Until then set
-AMLOP_CLEANING_MODULE to the absolute path of a reviewed cleaning.py checkout.
-An explicit invalid path fails rather than silently skipping integration.
-"""
-import importlib.util
-import os
+"""Synthetic CSV batches through the merged cleaner and feature preprocessing."""
 from pathlib import Path
 import sys
 
@@ -15,22 +8,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from amlop_ca1.features import FEATURE_COLUMNS, make_feature_pipeline
-
-@pytest.fixture(scope='module')
-def cleaner():
-    configured = os.environ.get('AMLOP_CLEANING_MODULE')
-    path = Path(configured) if configured else Path(__file__).resolve().parents[1] / 'src/amlop_ca1/cleaning.py'
-    if not path.is_file():
-        if configured:
-            pytest.fail(f'Configured cleaning module does not exist: {path}')
-        pytest.skip('PR #13 is unmerged; set AMLOP_CLEANING_MODULE to test its checkout')
-    spec = importlib.util.spec_from_file_location('reviewed_cleaning', path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+from amlop_ca1 import cleaning as cleaner
 
 @pytest.fixture
-def batch(cleaner, tmp_path):
+def batch(tmp_path):
     c = pd.DataFrame({
         'country_code':['MY','PH'], 'customer_id':['0000000001','0000000001'],
         'mobile_verified':['yes','False'], 'num_orders_last_50days':[1,2],
@@ -50,7 +31,7 @@ def batch(cleaner, tmp_path):
 def dense(matrix):
     return matrix.toarray() if hasattr(matrix, 'toarray') else matrix
 
-def test_three_file_batch_keys_nullables_alignment_and_label_free_inference(cleaner,batch):
+def test_three_file_batch_keys_nullables_alignment_and_label_free_inference(batch):
     snapshots = [x.copy(deep=True) for x in batch]
     rejects = cleaner.RejectLog()
     merged = cleaner.clean_and_merge(*batch, rejects)
@@ -72,7 +53,7 @@ def test_three_file_batch_keys_nullables_alignment_and_label_free_inference(clea
     for frame, snapshot in zip(batch,snapshots):
         pd.testing.assert_frame_equal(frame,snapshot)
 
-def test_orphan_conflicting_and_missing_keys_report_rejections(cleaner,batch):
+def test_orphan_conflicting_and_missing_keys_report_rejections(batch):
     c,o,l = [x.copy(deep=True) for x in batch]
     l = pd.concat([l,l.iloc[[0]].assign(is_fraud=0),
         l.iloc[[1]].assign(order_id='orphan'),l.iloc[[1]].assign(order_id=' ')],ignore_index=True)
@@ -85,12 +66,12 @@ def test_orphan_conflicting_and_missing_keys_report_rejections(cleaner,batch):
     assert any('missing order_id' in r for r in reasons)
     assert len(merged) + int((rejects.to_frame().table == 'labels').sum()) == len(l)
 
-def test_missing_batch_schema_fails_explicitly(cleaner,batch):
+def test_missing_batch_schema_fails_explicitly(batch):
     c,o,l = batch
     with pytest.raises(ValueError, match='order_value'):
         cleaner.clean_and_merge(c,o.drop(columns='order_value'),l)
 
-def test_unknown_categories_and_training_state_are_isolated(cleaner,batch):
+def test_unknown_categories_and_training_state_are_isolated(batch):
     merged = cleaner.clean_and_merge(*batch)
     train = merged.iloc[[0]].copy()
     test = merged.iloc[[1]].assign(payment_method='future wallet',order_value=100000)
@@ -100,3 +81,22 @@ def test_unknown_categories_and_training_state_are_isolated(cleaner,batch):
     matrix = dense(pipeline.transform(test.drop(columns='is_fraud')))
     assert matrix.shape[0] == 1 and np.isfinite(matrix).all()
     np.testing.assert_array_equal(imputer.statistics_,before)
+
+
+def test_orders_only_inference_uses_the_same_predictors_as_training(batch):
+    customers, orders, labels = batch
+    merged = cleaner.clean_and_merge(customers, orders, labels)
+    pipeline = make_feature_pipeline().fit(merged)
+    snapshot = orders.copy(deep=True)
+    cleaned_orders = cleaner.clean_orders(orders)
+    assert 'is_fraud' not in cleaned_orders and 'customer_id' not in cleaned_orders
+    assert cleaned_orders.index.tolist() == orders.index.tolist()
+    # Match by composite key, rather than assuming the label-driven merge order.
+    aligned = merged.set_index(cleaner.ORDER_KEY).loc[
+        pd.MultiIndex.from_frame(cleaned_orders[cleaner.ORDER_KEY])
+    ].reset_index()
+    actual = dense(pipeline.transform(cleaned_orders))
+    expected = dense(pipeline.transform(aligned))
+    np.testing.assert_allclose(actual, expected)
+    assert np.isfinite(actual).all()
+    pd.testing.assert_frame_equal(orders, snapshot)

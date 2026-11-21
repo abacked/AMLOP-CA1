@@ -40,7 +40,7 @@ def test_allowlist_and_derived_features(orders):
     assert tuple(result.columns) == FEATURE_COLUMNS
     np.testing.assert_allclose(result["value_per_item"], [10, 10, 10])
     assert result["order_weekday"].tolist() == [0, 1, 2]
-    assert result["order_month"].tolist() == [1, 2, 3]
+    assert "order_month" not in result.columns
 
 
 def test_leakage_columns_cannot_affect_predictors(orders):
@@ -50,6 +50,7 @@ def test_leakage_columns_cannot_affect_predictors(orders):
         total_payment_last_50days=[100, 200, 300],
         num_orders_last_50days=[9, 8, 7], first_order_datetime="2020-01-01",
         mobile_verified=True, num_associated_customers=50,
+        first_order_missing=1, first_order_invalid=1, account_age_days=100,
     )
     builder = OrderFeatures().fit(extra, [0, 1, 1])
     pd.testing.assert_frame_equal(builder.transform(extra), builder.transform(orders))
@@ -119,7 +120,7 @@ def test_invalid_dates_are_missing_without_guessing(orders):
     frame = orders.copy()
     frame["order_date"] = ["2023-02-30", "02/03/2023", None]
     result = OrderFeatures().fit_transform(frame)
-    assert result[["order_weekday", "order_month"]].isna().all().all()
+    assert result["order_weekday"].isna().all()
     assert np.isfinite(dense(make_feature_pipeline().fit_transform(frame))).all()
 
 
@@ -128,7 +129,7 @@ def test_already_parsed_dates_are_supported(orders):
     frame["order_date"] = pd.to_datetime(["2023-01-02", None, "2023-03-08"])
     result = OrderFeatures().fit_transform(frame)
     assert result.loc[0, "order_weekday"] == 0
-    assert pd.isna(result.loc[1, "order_month"])
+    assert pd.isna(result.loc[1, "order_weekday"])
 
 
 def test_nullable_values_and_invalid_categories_are_safe(orders):
@@ -142,7 +143,7 @@ def test_nullable_values_and_invalid_categories_are_safe(orders):
     result = OrderFeatures().fit_transform(frame)
     assert result.loc[:1, ["order_value", "num_items_ordered"]].isna().all().all()
     assert result.loc[2, "value_per_item"] == pytest.approx(1.25)
-    assert result[["country_code", "collect_type", "payment_method", "order_month"]].isna().all().all()
+    assert result[["country_code", "collect_type", "payment_method", "order_weekday"]].isna().all().all()
     assert np.isfinite(dense(make_feature_pipeline().fit_transform(frame))).all()
 
 
@@ -250,3 +251,18 @@ def test_cleaning_style_nullable_strings_and_datetimes(orders):
     assert result.shape[0] == len(frame)
     assert np.isfinite(result).all()
     pd.testing.assert_frame_equal(frame, snapshot)
+
+
+def test_month_cannot_change_predictors_for_the_same_weekday(orders):
+    training = orders.assign(order_date="2023-01-02")  # Monday
+    future = training.assign(order_date="2023-06-05")  # Monday, unseen month
+    pipeline = make_feature_pipeline().fit(training)
+    np.testing.assert_allclose(dense(pipeline.transform(training)), dense(pipeline.transform(future)))
+    assert all("order_month" not in name for name in pipeline.get_feature_names_out())
+
+
+@pytest.mark.parametrize("text", ["2023-Jan-02", "2023-January-02"])
+def test_shared_cleaning_month_name_date_formats(orders, text):
+    frame = orders.assign(order_date=text)
+    result = OrderFeatures().fit_transform(frame)
+    assert result["order_weekday"].tolist() == [0, 0, 0]
