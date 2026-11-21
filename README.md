@@ -27,6 +27,8 @@ The three supplied base CSVs are stored in `data/` with Git LFS. Install Git LFS
 
 ## Team workflow
 
+For the RDS setup status, keyed MySQL schema, secure configuration and repeatable bootstrap/validation steps, see [docs/database.md](docs/database.md) and [infra/schema.sql](infra/schema.sql).
+
 1. Refine the Product Backlog Items in GitHub Issues during the Week 3 requirements meeting. Set estimates with the team.
 2. Add each issue to the GitHub Project. During Week 4 sprint planning, break PBIs into assigned tasks.
 3. Create a branch for each task (`feature/<issue-number>-short-name`), open a pull request, and request a teammate review.
