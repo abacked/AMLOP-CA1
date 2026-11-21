@@ -32,6 +32,7 @@ venv/
 mlruns/
 artifacts/
 reports/generated/
+logs/
 *.db
 *.sqlite
 *.sqlite3
@@ -41,3 +42,6 @@ reports/generated/
 Thumbs.db
 .vscode/
 .idea/
+
+# Local course files (spec, templates, screenshots); never committed
+private/
