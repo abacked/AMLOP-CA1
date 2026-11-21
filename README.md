@@ -36,7 +36,7 @@ $env:PYTHONPATH = "src"
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-On Linux or macOS, from the repository root:
+On Linux, from the repository root:
 
 ```bash
 python3.12 -m venv .venv
