@@ -1,7 +1,9 @@
-# cleaning.py needs only pandas + numpy; the rest is for eda.ipynb and tests.
-pandas>=2.0
-numpy
-matplotlib
-ipykernel
-nbconvert
-pytest
+# Shared environment for cleaning, EDA, feature preprocessing and tests.
+# Tested with Python 3.12; direct dependencies are pinned.
+numpy==2.5.4
+pandas==3.1.0
+scikit-learn==1.9.1
+matplotlib==3.10.8
+ipykernel==7.4.0
+nbconvert==7.17.2
+pytest==9.2.0
