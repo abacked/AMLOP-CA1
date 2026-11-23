@@ -125,7 +125,7 @@ class OrderFeatures(TransformerMixin, BaseEstimator):
             # object + np.nan is compatible with sklearn's categorical imputer.
             values = X[column].map(
                 lambda value: value.strip() if isinstance(value, str) and value.strip() else np.nan
-            ).to_numpy(dtype=object)
+            ).to_numpy(dtype=object, na_value=np.nan)
             if column == "country_code":
                 values = np.asarray([
                     value.upper() if isinstance(value, str) and len(value) == 2 and value.isalpha()

@@ -15,7 +15,7 @@ from sklearn.exceptions import NotFittedError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from amlop_ca1.features import (  # noqa: E402
-    FEATURE_COLUMNS, MAX_NUMERIC_VALUE, OrderFeatures, make_feature_pipeline,
+    CATEGORICAL_FEATURES, FEATURE_COLUMNS, MAX_NUMERIC_VALUE, OrderFeatures, make_feature_pipeline,
 )
 
 
@@ -266,3 +266,25 @@ def test_shared_cleaning_month_name_date_formats(orders, text):
     frame = orders.assign(order_date=text)
     result = OrderFeatures().fit_transform(frame)
     assert result["order_weekday"].tolist() == [0, 0, 0]
+
+
+@pytest.mark.parametrize("storage", ["python", "pyarrow"])
+@pytest.mark.parametrize("column", CATEGORICAL_FEATURES)
+def test_all_missing_nullable_categories_fit_and_infer_safely(orders, storage, column):
+    if storage == "pyarrow":
+        pytest.importorskip("pyarrow")
+    missing = orders.copy()
+    missing[column] = pd.Series(pd.NA, index=orders.index, dtype=f"string[{storage}]")
+    built = OrderFeatures().fit_transform(missing)
+    assert all(value is not pd.NA for value in built[column])
+    assert built[column].isna().all()
+
+    # An entirely missing training category must not reach SimpleImputer as pd.NA.
+    empty_trained = make_feature_pipeline().fit(missing)
+    assert np.isfinite(dense(empty_trained.transform(orders))).all()
+
+    # Also cover a one-row inference batch after fitting on known categories.
+    pipeline = make_feature_pipeline().fit(orders)
+    inferred = dense(pipeline.transform(missing.iloc[[0]]))
+    assert inferred.shape == (1, len(pipeline.get_feature_names_out()))
+    assert np.isfinite(inferred).all()
