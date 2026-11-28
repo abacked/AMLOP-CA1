@@ -19,10 +19,13 @@ are always scored on later orders than they were trained on. Compare models on
 the validation metrics; test metrics are reported but never used for tuning.
 
 Set MLFLOW_TRACKING_URI to log to the team server, otherwise MLflow logs
-locally. XGBoost uses CUDA when an NVIDIA GPU is found, or pass --device.
+locally. MLFLOW_EXPERIMENT_NAME picks the experiment (default amlop-ca1-fraud,
+as in .env.example). XGBoost uses CUDA when an NVIDIA GPU is found, or pass
+--device.
 """
 
 import argparse
+import os
 import shutil
 
 import mlflow
@@ -42,7 +45,7 @@ from amlop_ca1.features import REQUIRED_COLUMNS, make_feature_pipeline
 
 
 CONTRIBUTOR = "r-z23"
-EXPERIMENT = "sp-buy-fraud"
+EXPERIMENT = os.environ.get("MLFLOW_EXPERIMENT_NAME", "amlop-ca1-fraud")
 TARGET = "is_fraud"
 PARAMS = {
     "v1": {"n_estimators": 300, "max_depth": 6, "learning_rate": 0.1},
